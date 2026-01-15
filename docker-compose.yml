@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  ib-server:
+    build: .
+    ports:
+      - "8080:8080"
+      - "9090:9090"  # Prometheus metrics (optional)
+    volumes:
+      - ib-data:/data
+    environment:
+      # Required
+      IB_TOKEN: "your-secret-token-here"
+      IB_S3_BUCKET: "ib-backups"
+      IB_S3_ACCESS_KEY: "minioadmin"
+      IB_S3_SECRET_KEY: "minioadmin"
+
+      # Optional
+      IB_S3_ENDPOINT: "http://minio:9000"  # For S3-compatible storage
+      IB_S3_REGION: "us-east-1"
+      IB_TITLE: "My Backups"
+      IB_RETENTION_DAYS: "90"
+      IB_METRICS_PORT: "9090"
+
+      # Defaults (can be omitted)
+      # IB_DB_PATH: "/data/ib.db"
+      # IB_LISTEN_ADDR: ":8080"
+    restart: unless-stopped
+
+  # Optional: MinIO for local S3-compatible storage
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+volumes:
+  ib-data:
+  minio-data:

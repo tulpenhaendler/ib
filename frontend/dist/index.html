@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ib Backup</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f1f5f9;
+            color: #1e293b;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        header {
+            background: #0f172a;
+            color: white;
+            padding: 1rem 0;
+            margin-bottom: 2rem;
+        }
+        header .inner {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        header h1 { font-size: 1.25rem; cursor: pointer; }
+        header h1:hover { opacity: 0.8; }
+        .card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        h2 { margin-bottom: 1rem; color: #0f172a; font-size: 1.1rem; }
+
+        /* Filters */
+        .filters {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+        }
+        .filter-group { display: flex; flex-direction: column; gap: 0.25rem; }
+        .filter-group label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; }
+        .filter-group select {
+            padding: 0.5rem 2rem 0.5rem 0.75rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+            background: white;
+            font-size: 0.9rem;
+            min-width: 150px;
+            cursor: pointer;
+        }
+        .filter-group select:focus { outline: none; border-color: #1e3a5f; }
+
+        /* Backup list */
+        .backup-item {
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .backup-item:hover {
+            background: #f8fafc;
+            border-color: #1e3a5f;
+        }
+        .backup-item h3 { font-size: 0.95rem; margin-bottom: 0.25rem; }
+        .backup-meta { font-size: 0.8rem; color: #64748b; margin-bottom: 0.5rem; }
+        .tag {
+            display: inline-block;
+            background: #1e3a5f;
+            color: #e2e8f0;
+            padding: 0.125rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            margin-right: 0.375rem;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #64748b;
+        }
+
+        /* Detail page */
+        .back-link {
+            color: #1e3a5f;
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            margin-bottom: 1rem;
+        }
+        .back-link:hover { text-decoration: underline; }
+        .detail-header { margin-bottom: 1.5rem; }
+        .detail-header h2 { margin-bottom: 0.5rem; font-size: 1.25rem; }
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        .info-item label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; display: block; }
+        .info-item span { font-size: 1rem; font-weight: 500; }
+
+        /* Download buttons */
+        .download-section { margin-top: 1.5rem; }
+        .download-buttons {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin-top: 0.75rem;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.625rem 1rem;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: background 0.15s;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-primary { background: #1e3a5f; color: white; }
+        .btn-primary:hover { background: #0f172a; }
+        .btn-secondary { background: #e2e8f0; color: #1e293b; }
+        .btn-secondary:hover { background: #cbd5e1; }
+
+        /* CLI section */
+        .cli-section { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #e2e8f0; }
+        pre {
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 1rem;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            margin-top: 0.5rem;
+        }
+        code { font-family: 'SF Mono', Monaco, 'Courier New', monospace; }
+
+        /* Tabs */
+        .tabs { display: flex; gap: 0; margin-bottom: 1rem; border-bottom: 2px solid #e2e8f0; }
+        .tab {
+            padding: 0.75rem 1.25rem;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+            font-size: 0.95rem;
+            font-weight: 500;
+            color: #475569;
+        }
+        .tab:hover { color: #1e293b; background: #f8fafc; }
+        .tab.active { border-bottom-color: #1e3a5f; color: #1e3a5f; font-weight: 600; background: #f1f5f9; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Dark mode */
+        @media (prefers-color-scheme: dark) {
+            body { background: #0f172a; color: #e2e8f0; }
+            .card { background: #1e293b; }
+            h2 { color: #f1f5f9; }
+            .filter-group select { background: #334155; border-color: #475569; color: #e2e8f0; }
+            .backup-item { border-color: #334155; }
+            .backup-item:hover { background: #334155; border-color: #475569; }
+            .backup-item h3 { color: #f1f5f9; }
+            .btn-secondary { background: #334155; color: #e2e8f0; }
+            .btn-secondary:hover { background: #475569; }
+            .cli-section { border-top-color: #334155; }
+            .tabs { border-bottom-color: #334155; }
+            .tab { color: #94a3b8; }
+            .tab:hover { color: #e2e8f0; background: #334155; }
+            .tab.active { color: #e2e8f0; background: #1e3a5f; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="inner">
+            <h1 id="site-title" onclick="showList()">ib Backup</h1>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- List View -->
+        <div id="list-view">
+            <div class="card">
+                <h2>Backups</h2>
+                <div class="filters" id="filters"></div>
+                <div id="backup-list">
+                    <div class="empty-state">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detail View -->
+        <div id="detail-view" style="display: none;">
+            <a href="#" class="back-link" onclick="showList(); return false;">← Back to list</a>
+            <div class="card">
+                <div class="detail-header">
+                    <h2 id="detail-title"></h2>
+                    <div id="detail-tags"></div>
+                </div>
+
+                <div class="info-grid" id="detail-info"></div>
+
+                <div class="download-section">
+                    <h2>Download</h2>
+                    <div class="tabs">
+                        <div class="tab active" onclick="switchTab('http')">HTTP Download</div>
+                        <div class="tab" onclick="switchTab('cli')">CLI</div>
+                    </div>
+
+                    <div id="tab-http" class="tab-content active">
+                        <p style="color: #64748b; font-size: 0.9rem; margin-bottom: 0.75rem;">Download the entire backup as an archive:</p>
+                        <div class="download-buttons" id="download-buttons"></div>
+                    </div>
+
+                    <div id="tab-cli" class="tab-content">
+                        <p style="color: #64748b; font-size: 0.9rem;">Use the ib CLI for faster downloads with resume support:</p>
+                        <pre><code id="cli-instructions"></code></pre>
+                        <div style="margin-top: 1rem;">
+                            <a href="/cli/linux/amd64" class="btn btn-secondary">Download CLI (Linux)</a>
+                            <a href="/cli/darwin/arm64" class="btn btn-secondary">Download CLI (macOS)</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allManifests = [];
+        let tagValues = {};
+        let currentFilters = {};
+        let config = { title: 'ib Backup' };
+
+        async function init() {
+            await loadConfig();
+            await loadManifests();
+        }
+
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                if (res.ok) {
+                    config = await res.json();
+                    document.getElementById('site-title').textContent = config.title;
+                    document.title = config.title;
+                }
+            } catch (e) {}
+        }
+
+        async function loadManifests() {
+            const container = document.getElementById('backup-list');
+            try {
+                const res = await fetch('/api/manifests');
+                if (!res.ok) throw new Error('Failed to fetch');
+                allManifests = await res.json() || [];
+
+                // Extract unique tag keys and values
+                tagValues = {};
+                allManifests.forEach(m => {
+                    const tags = m.Tags || m.tags || {};
+                    Object.entries(tags).forEach(([k, v]) => {
+                        if (!tagValues[k]) tagValues[k] = new Set();
+                        tagValues[k].add(v);
+                    });
+                });
+
+                renderFilters();
+                renderList();
+            } catch (e) {
+                container.innerHTML = '<div class="empty-state">Failed to load backups</div>';
+            }
+        }
+
+        function renderFilters() {
+            const container = document.getElementById('filters');
+            const keys = Object.keys(tagValues).filter(k => k !== 'name').sort();
+
+            if (keys.length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+
+            container.innerHTML = keys.map(key => `
+                <div class="filter-group">
+                    <label>${key}</label>
+                    <select onchange="setFilter('${key}', this.value)">
+                        <option value="">All</option>
+                        ${[...tagValues[key]].sort().map(v =>
+                            `<option value="${v}">${v}</option>`
+                        ).join('')}
+                    </select>
+                </div>
+            `).join('');
+        }
+
+        function setFilter(key, value) {
+            if (value) {
+                currentFilters[key] = value;
+            } else {
+                delete currentFilters[key];
+            }
+            renderList();
+        }
+
+        function renderList() {
+            const container = document.getElementById('backup-list');
+
+            let filtered = allManifests.filter(m => {
+                const tags = m.Tags || m.tags || {};
+                return Object.entries(currentFilters).every(([k, v]) => tags[k] === v);
+            });
+
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="empty-state">No backups found</div>';
+                return;
+            }
+
+            // Sort by date, newest first
+            filtered.sort((a, b) => {
+                const dateA = new Date(a.CreatedAt || a.created_at);
+                const dateB = new Date(b.CreatedAt || b.created_at);
+                return dateB - dateA;
+            });
+
+            container.innerHTML = filtered.map(m => {
+                const id = m.ID || m.id;
+                const date = new Date(m.CreatedAt || m.created_at);
+                const tags = m.Tags || m.tags || {};
+                const displayName = tags.name || id;
+                const displayTags = Object.entries(tags).filter(([k]) => k !== 'name');
+
+                return `
+                    <div class="backup-item" onclick="showDetail('${id}')">
+                        <h3>${displayName}</h3>
+                        <div class="backup-meta">${formatRelativeDate(date)}</div>
+                        <div>
+                            ${displayTags.map(([k,v]) =>
+                                `<span class="tag">${k}=${v}</span>`
+                            ).join('')}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function showDetail(id) {
+            document.getElementById('list-view').style.display = 'none';
+            document.getElementById('detail-view').style.display = 'block';
+
+            // Fetch full manifest
+            try {
+                const res = await fetch(`/api/manifests/${id}`);
+                if (!res.ok) throw new Error('Failed to fetch');
+                const manifest = await res.json();
+
+                renderDetail(manifest);
+            } catch (e) {
+                document.getElementById('detail-title').textContent = 'Error loading backup';
+            }
+        }
+
+        function renderDetail(manifest) {
+            const id = manifest.ID || manifest.id;
+            const date = new Date(manifest.CreatedAt || manifest.created_at);
+            const tags = manifest.Tags || manifest.tags || {};
+            const entries = manifest.Entries || manifest.entries || [];
+            const displayName = tags.name || id;
+            const displayTags = Object.entries(tags).filter(([k]) => k !== 'name');
+
+            // Calculate stats
+            const files = entries.filter(e => (e.Type || e.type) === 'file');
+            const dirs = entries.filter(e => (e.Type || e.type) === 'dir');
+            const totalSize = files.reduce((sum, e) => sum + (e.Size || e.size || 0), 0);
+
+            document.getElementById('detail-title').textContent = displayName;
+            document.getElementById('detail-tags').innerHTML = displayTags
+                .map(([k,v]) => `<span class="tag">${k}=${v}</span>`).join('');
+
+            document.getElementById('detail-info').innerHTML = `
+                <div class="info-item">
+                    <label>Created</label>
+                    <span>${formatRelativeDate(date)}</span>
+                </div>
+                <div class="info-item">
+                    <label>Manifest ID</label>
+                    <span style="font-family: monospace; font-size: 0.85rem;">${id}</span>
+                </div>
+                <div class="info-item">
+                    <label>Files</label>
+                    <span>${files.length.toLocaleString()}</span>
+                </div>
+                <div class="info-item">
+                    <label>Directories</label>
+                    <span>${dirs.length.toLocaleString()}</span>
+                </div>
+                <div class="info-item">
+                    <label>Total Size</label>
+                    <span>${formatSize(totalSize)}</span>
+                </div>
+            `;
+
+            document.getElementById('download-buttons').innerHTML = `
+                <a href="/api/download/${id}.tar.gz" class="btn btn-primary">
+                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/><path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/></svg>
+                    Download .tar.gz
+                </a>
+                <a href="/api/download/${id}.zip" class="btn btn-secondary">
+                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/><path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/></svg>
+                    Download .zip
+                </a>
+            `;
+
+            const origin = window.location.origin;
+            document.getElementById('cli-instructions').textContent =
+`# Connect to server (one time)
+ib login ${origin}
+
+# Restore this backup
+ib backup restore --id ${id} ./restore-dir`;
+        }
+
+        function showList() {
+            document.getElementById('list-view').style.display = 'block';
+            document.getElementById('detail-view').style.display = 'none';
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.tab:nth-child(${tab === 'http' ? 1 : 2})`).classList.add('active');
+            document.getElementById(`tab-${tab}`).classList.add('active');
+        }
+
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function formatRelativeDate(date) {
+            const now = new Date();
+            const diff = now - date;
+            const seconds = Math.floor(diff / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            const days = Math.floor(hours / 24);
+
+            if (seconds < 60) return 'Just now';
+            if (minutes < 60) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+            if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+            if (days === 1) return 'Yesterday';
+            if (days < 7) return `${days} days ago`;
+
+            // For older dates, show a friendly format
+            const options = { month: 'short', day: 'numeric', year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined };
+            const formatted = date.toLocaleDateString('en-US', options);
+            const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+            return `${formatted} at ${time}`;
+        }
+
+        init();
+    </script>
+</body>
+</html>

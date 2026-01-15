@@ -1,0 +1,24 @@
+# Binaries
+/dist/
+*.exe
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Config (contains secrets)
+.config/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test output
+/tmp/
+*.log
