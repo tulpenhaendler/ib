@@ -208,9 +208,9 @@ func NewNode(ctx context.Context, storage StorageBackend, cfg *Config) (*Node, e
 	return node, nil
 }
 
-// periodicAdvertise re-advertises root CIDs every 12 hours
+// periodicAdvertise re-advertises root CIDs every 10 minutes
 func (n *Node) periodicAdvertise() {
-	ticker := time.NewTicker(12 * time.Hour)
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
 	for {
