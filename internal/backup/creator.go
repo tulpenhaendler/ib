@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,7 @@ type Progress struct {
 	TotalFiles     int64
 	ProcessedFiles int64
 	SkippedFiles   int64 // Files unchanged from previous backup
+	ErrorFiles     int64 // Files skipped due to errors (permission denied, etc)
 	TotalBytes     int64
 	UploadedBytes  int64
 	SkippedBytes   int64 // Bytes from blocks that already existed
@@ -153,9 +155,18 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 			var blocks []string
 			var fileUploadedBytes int64
 			var fileSkippedBytes int64
+			var fileError error
 
 			for chunk := range chunks {
 				if chunk.Error != nil {
+					// Check if this is a permission error - skip file instead of failing
+					if os.IsPermission(chunk.Error) {
+						fileError = chunk.Error
+						// Drain remaining chunks
+						for range chunks {
+						}
+						break
+					}
 					errOnce.Do(func() { firstErr = fmt.Errorf("chunking %s: %w", e.Path, chunk.Error) })
 					return
 				}
@@ -183,6 +194,15 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 				blocks = append(blocks, chunk.CID)
 			}
 
+			// Handle files that couldn't be read
+			if fileError != nil {
+				fmt.Printf("Warning: skipping %s: %v\n", e.Path, fileError)
+				atomic.AddInt64(&progress.ErrorFiles, 1)
+				atomic.AddInt64(&progress.ProcessedFiles, 1)
+				e.Blocks = nil // Mark as unreadable
+				return
+			}
+
 			e.Blocks = blocks
 			atomic.AddInt64(&progress.ProcessedFiles, 1)
 			atomic.AddInt64(&progress.UploadedBytes, fileUploadedBytes)
@@ -203,9 +223,9 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 		return nil, firstErr
 	}
 
-	// Add all file entries to manifest
+	// Add all file entries to manifest (skip files that had errors)
 	for _, entry := range entries {
-		if entry.Type == FileTypeFile {
+		if entry.Type == FileTypeFile && entry.Blocks != nil {
 			manifest.AddEntry(entry)
 		}
 	}
@@ -231,6 +251,7 @@ func (c *Creator) reportProgress(ctx context.Context, p *Progress) {
 			blocksUploaded := atomic.LoadInt64(&p.BlocksUploaded)
 			blocksSkipped := atomic.LoadInt64(&p.BlocksSkipped)
 			skippedFiles := atomic.LoadInt64(&p.SkippedFiles)
+			errorFiles := atomic.LoadInt64(&p.ErrorFiles)
 			currentFile, _ := p.CurrentFile.Load().(string)
 
 			elapsed := time.Since(p.StartTime)
@@ -245,11 +266,14 @@ func (c *Creator) reportProgress(ctx context.Context, p *Progress) {
 
 			fmt.Printf("\n[%s] Progress: %d/%d files (%.1f%%)\n",
 				elapsed.Round(time.Second), processed, total, pct)
-			fmt.Printf("  Uploaded: %s (%d blocks) | Skipped: %s (%d blocks)\n",
+			fmt.Printf("  Uploaded: %s (%d blocks) | Dedup: %s (%d blocks)\n",
 				formatBytes(uploaded), blocksUploaded,
 				formatBytes(skipped), blocksSkipped)
 			if skippedFiles > 0 {
 				fmt.Printf("  Unchanged files: %d (reused from previous backup)\n", skippedFiles)
+			}
+			if errorFiles > 0 {
+				fmt.Printf("  Skipped files: %d (permission denied or unreadable)\n", errorFiles)
 			}
 			if speed > 0 {
 				fmt.Printf("  Speed: %s/s\n", formatBytes(int64(speed)))
@@ -274,13 +298,20 @@ func (c *Creator) printFinalProgress(p *Progress) {
 	blocksUploaded := atomic.LoadInt64(&p.BlocksUploaded)
 	blocksSkipped := atomic.LoadInt64(&p.BlocksSkipped)
 	skippedFiles := atomic.LoadInt64(&p.SkippedFiles)
+	errorFiles := atomic.LoadInt64(&p.ErrorFiles)
 
 	fmt.Printf("\n=== Backup Complete ===\n")
 	fmt.Printf("Duration: %s\n", elapsed.Round(time.Second))
 	fmt.Printf("Files: %d/%d processed\n", processed, total)
 	if skippedFiles > 0 {
 		fmt.Printf("  - %d unchanged (reused from previous backup)\n", skippedFiles)
-		fmt.Printf("  - %d new/modified\n", processed-skippedFiles)
+	}
+	if errorFiles > 0 {
+		fmt.Printf("  - %d skipped (permission denied)\n", errorFiles)
+	}
+	actualProcessed := processed - skippedFiles - errorFiles
+	if actualProcessed > 0 {
+		fmt.Printf("  - %d new/modified\n", actualProcessed)
 	}
 	fmt.Printf("Data: %s uploaded, %s deduplicated\n",
 		formatBytes(uploaded), formatBytes(skipped))
