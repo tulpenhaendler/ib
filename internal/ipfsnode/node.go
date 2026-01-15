@@ -18,6 +18,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -78,10 +79,24 @@ func NewNode(ctx context.Context, storage StorageBackend, cfg *Config) (*Node, e
 		listenAddrs = append(listenAddrs, ma)
 	}
 
-	// Create libp2p host with DHT
+	// Create connection manager
+	connMgr, err := connmgr.NewConnManager(100, 400, connmgr.WithGracePeriod(time.Minute))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection manager: %w", err)
+	}
+
+	// Create libp2p host with DHT and NAT traversal
 	var dhtInstance *dht.IpfsDHT
 	h, err := libp2p.New(
 		libp2p.ListenAddrs(listenAddrs...),
+		libp2p.ConnectionManager(connMgr),
+		libp2p.NATPortMap(),                    // Enable UPnP/NAT-PMP
+		libp2p.EnableNATService(),              // Help others with NAT detection
+		libp2p.EnableHolePunching(),            // Enable hole punching for NAT traversal
+		libp2p.EnableRelayService(),            // Act as relay for others
+		libp2p.EnableAutoRelayWithStaticRelays( // Use relays if needed
+			dht.GetDefaultBootstrapPeerAddrInfos(),
+		),
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
 			var err error
 			dhtInstance, err = dht.New(ctx, h, dht.Mode(dht.ModeServer))
