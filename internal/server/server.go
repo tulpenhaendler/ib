@@ -38,6 +38,7 @@ type Server struct {
 	metrics     *Metrics
 	title       string
 	ipfsNode    *ipfsnode.Node
+	rateLimiter *RateLimiter
 }
 
 // New creates a new server instance
@@ -58,6 +59,7 @@ func New(cfg *config.ServerConfig, metricsPort int, title string) (*Server, erro
 		metricsPort: metricsPort,
 		metrics:     NewMetrics(),
 		title:       title,
+		rateLimiter: NewRateLimiter(15 * time.Second),
 	}
 
 	// Start IPFS node if enabled
@@ -210,8 +212,20 @@ func (s *Server) setupRoutes() {
 
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		clientIP := GetRealIP(c)
+
+		// Check if IP is blocked due to previous failed attempts
+		if s.rateLimiter.IsBlocked(clientIP) {
+			LogFailedAuth(clientIP, "ip temporarily blocked", true)
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many failed attempts, try again later"})
+			c.Abort()
+			return
+		}
+
 		token := c.GetHeader("Authorization")
 		if token == "" {
+			LogFailedAuth(clientIP, "missing authorization header", false)
+			s.rateLimiter.BlockIP(clientIP)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authorization header"})
 			c.Abort()
 			return
@@ -224,6 +238,8 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		}
 
 		if token != s.config.Token {
+			LogFailedAuth(clientIP, "invalid token", false)
+			s.rateLimiter.BlockIP(clientIP)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			c.Abort()
 			return
