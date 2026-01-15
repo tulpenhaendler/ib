@@ -20,7 +20,7 @@ build-frontend:
 	@mkdir -p frontend/dist
 	@if [ -f frontend/package.json ]; then \
 		cd frontend && npm install && npm run build; \
-	else \
+	elif [ ! -f frontend/dist/index.html ]; then \
 		echo '<!DOCTYPE html><html><head><title>ib</title></head><body><h1>ib Backup Server</h1><p>Web UI coming soon...</p></body></html>' > frontend/dist/index.html; \
 	fi
 
