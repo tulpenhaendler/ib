@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // BlockUploader is an interface for checking and uploading blocks
@@ -30,14 +31,18 @@ func NewCreator(uploader BlockUploader, concurrency int) *Creator {
 	}
 }
 
-// CreateProgress represents backup creation progress
-type CreateProgress struct {
-	TotalFiles      int64
-	ProcessedFiles  int64
-	SkippedFiles    int64
-	TotalBytes      int64
-	UploadedBytes   int64
-	CurrentFile     string
+// Progress tracks backup creation progress
+type Progress struct {
+	TotalFiles     int64
+	ProcessedFiles int64
+	SkippedFiles   int64 // Files unchanged from previous backup
+	TotalBytes     int64
+	UploadedBytes  int64
+	SkippedBytes   int64 // Bytes from blocks that already existed
+	BlocksUploaded int64
+	BlocksSkipped  int64 // Blocks that already existed on server
+	CurrentFile    atomic.Value
+	StartTime      time.Time
 }
 
 // Create creates a backup of the given path with the specified tags
@@ -55,7 +60,22 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 	}
 	manifest := NewManifest(tags, absPath)
 
+	// Initialize progress tracking
+	progress := &Progress{
+		StartTime: time.Now(),
+	}
+	progress.CurrentFile.Store("")
+
+	// Start progress reporter
+	progressCtx, cancelProgress := context.WithCancel(ctx)
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
+		c.reportProgress(progressCtx, progress)
+	}()
+
 	// Scan directory
+	fmt.Println("Scanning directory...")
 	scanner := NewScanner(rootPath)
 	scanResults := scanner.Scan()
 
@@ -67,16 +87,19 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 			continue
 		}
 		entries = append(entries, result.Entry)
+		if result.Entry.Type == FileTypeFile {
+			atomic.AddInt64(&progress.TotalFiles, 1)
+			atomic.AddInt64(&progress.TotalBytes, result.Entry.Size)
+		}
 	}
+
+	fmt.Printf("Found %d files (%s total)\n", progress.TotalFiles, formatBytes(progress.TotalBytes))
 
 	// Process files concurrently
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, c.concurrency)
-	errChan := make(chan error, 1)
 	var firstErr error
 	var errOnce sync.Once
-
-	var processedFiles int64
 
 	for i := range entries {
 		entry := &entries[i]
@@ -94,7 +117,9 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 					// File unchanged, reuse blocks from previous manifest
 					entry.Blocks = prevEntry.Blocks
 					manifest.AddEntry(*entry)
-					atomic.AddInt64(&processedFiles, 1)
+					atomic.AddInt64(&progress.ProcessedFiles, 1)
+					atomic.AddInt64(&progress.SkippedFiles, 1)
+					atomic.AddInt64(&progress.SkippedBytes, entry.Size)
 					continue
 				}
 			}
@@ -108,7 +133,7 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// Check for context cancellation
+			// Check for context cancellation or previous error
 			select {
 			case <-ctx.Done():
 				errOnce.Do(func() { firstErr = ctx.Err() })
@@ -116,41 +141,63 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 			default:
 			}
 
+			if firstErr != nil {
+				return
+			}
+
+			progress.CurrentFile.Store(e.Path)
+
 			fullPath := filepath.Join(rootPath, e.Path)
 			chunks := c.chunker.ChunkFile(fullPath)
 
 			var blocks []string
+			var fileUploadedBytes int64
+			var fileSkippedBytes int64
+
 			for chunk := range chunks {
 				if chunk.Error != nil {
-					errOnce.Do(func() { firstErr = chunk.Error })
+					errOnce.Do(func() { firstErr = fmt.Errorf("chunking %s: %w", e.Path, chunk.Error) })
 					return
 				}
 
 				// Check if block exists on server
 				exists, err := c.uploader.BlockExists(ctx, chunk.CID)
 				if err != nil {
-					errOnce.Do(func() { firstErr = err })
+					errOnce.Do(func() { firstErr = fmt.Errorf("checking block %s: %w", chunk.CID[:12], err) })
 					return
 				}
 
 				if !exists {
 					// Upload the block
 					if err := c.uploader.UploadBlock(ctx, chunk.CID, chunk.Data, chunk.OriginalSize); err != nil {
-						errOnce.Do(func() { firstErr = err })
+						errOnce.Do(func() { firstErr = fmt.Errorf("uploading block %s: %w", chunk.CID[:12], err) })
 						return
 					}
+					atomic.AddInt64(&progress.BlocksUploaded, 1)
+					fileUploadedBytes += int64(len(chunk.Data))
+				} else {
+					atomic.AddInt64(&progress.BlocksSkipped, 1)
+					fileSkippedBytes += chunk.OriginalSize
 				}
 
 				blocks = append(blocks, chunk.CID)
 			}
 
 			e.Blocks = blocks
-			atomic.AddInt64(&processedFiles, 1)
+			atomic.AddInt64(&progress.ProcessedFiles, 1)
+			atomic.AddInt64(&progress.UploadedBytes, fileUploadedBytes)
+			atomic.AddInt64(&progress.SkippedBytes, fileSkippedBytes)
 		}(entry)
 	}
 
 	wg.Wait()
-	close(errChan)
+
+	// Stop progress reporter
+	cancelProgress()
+	<-progressDone
+
+	// Print final progress
+	c.printFinalProgress(progress)
 
 	if firstErr != nil {
 		return nil, firstErr
@@ -164,4 +211,95 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 	}
 
 	return manifest, nil
+}
+
+func (c *Creator) reportProgress(ctx context.Context, p *Progress) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var lastUploadedBytes int64
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			processed := atomic.LoadInt64(&p.ProcessedFiles)
+			total := atomic.LoadInt64(&p.TotalFiles)
+			uploaded := atomic.LoadInt64(&p.UploadedBytes)
+			skipped := atomic.LoadInt64(&p.SkippedBytes)
+			blocksUploaded := atomic.LoadInt64(&p.BlocksUploaded)
+			blocksSkipped := atomic.LoadInt64(&p.BlocksSkipped)
+			skippedFiles := atomic.LoadInt64(&p.SkippedFiles)
+			currentFile, _ := p.CurrentFile.Load().(string)
+
+			elapsed := time.Since(p.StartTime)
+			speed := float64(uploaded-lastUploadedBytes) / 5.0 // bytes per second over last interval
+			lastUploadedBytes = uploaded
+
+			// Calculate percentage
+			var pct float64
+			if total > 0 {
+				pct = float64(processed) / float64(total) * 100
+			}
+
+			fmt.Printf("\n[%s] Progress: %d/%d files (%.1f%%)\n",
+				elapsed.Round(time.Second), processed, total, pct)
+			fmt.Printf("  Uploaded: %s (%d blocks) | Skipped: %s (%d blocks)\n",
+				formatBytes(uploaded), blocksUploaded,
+				formatBytes(skipped), blocksSkipped)
+			if skippedFiles > 0 {
+				fmt.Printf("  Unchanged files: %d (reused from previous backup)\n", skippedFiles)
+			}
+			if speed > 0 {
+				fmt.Printf("  Speed: %s/s\n", formatBytes(int64(speed)))
+			}
+			if currentFile != "" {
+				displayPath := currentFile
+				if len(displayPath) > 60 {
+					displayPath = "..." + displayPath[len(displayPath)-57:]
+				}
+				fmt.Printf("  Current: %s\n", displayPath)
+			}
+		}
+	}
+}
+
+func (c *Creator) printFinalProgress(p *Progress) {
+	elapsed := time.Since(p.StartTime)
+	processed := atomic.LoadInt64(&p.ProcessedFiles)
+	total := atomic.LoadInt64(&p.TotalFiles)
+	uploaded := atomic.LoadInt64(&p.UploadedBytes)
+	skipped := atomic.LoadInt64(&p.SkippedBytes)
+	blocksUploaded := atomic.LoadInt64(&p.BlocksUploaded)
+	blocksSkipped := atomic.LoadInt64(&p.BlocksSkipped)
+	skippedFiles := atomic.LoadInt64(&p.SkippedFiles)
+
+	fmt.Printf("\n=== Backup Complete ===\n")
+	fmt.Printf("Duration: %s\n", elapsed.Round(time.Second))
+	fmt.Printf("Files: %d/%d processed\n", processed, total)
+	if skippedFiles > 0 {
+		fmt.Printf("  - %d unchanged (reused from previous backup)\n", skippedFiles)
+		fmt.Printf("  - %d new/modified\n", processed-skippedFiles)
+	}
+	fmt.Printf("Data: %s uploaded, %s deduplicated\n",
+		formatBytes(uploaded), formatBytes(skipped))
+	fmt.Printf("Blocks: %d uploaded, %d already existed\n", blocksUploaded, blocksSkipped)
+	if elapsed.Seconds() > 0 && uploaded > 0 {
+		avgSpeed := float64(uploaded) / elapsed.Seconds()
+		fmt.Printf("Average speed: %s/s\n", formatBytes(int64(avgSpeed)))
+	}
+}
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }

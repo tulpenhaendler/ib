@@ -52,8 +52,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("the 'name' tag is required: use --tag name=<backup-name>")
 	}
 
-	fmt.Printf("Creating backup of %s with tags: %v\n", path, tags)
+	fmt.Printf("Creating backup: %s\n", tags["name"])
+	fmt.Printf("Path: %s\n", path)
+	fmt.Printf("Tags: %v\n", tags)
 	fmt.Printf("Concurrency: %d workers\n", createConcurrency)
+	fmt.Println()
 
 	// Load client config
 	cfg, err := config.LoadClient()
@@ -72,15 +75,16 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	// Fetch previous manifest for incremental backup
 	var prevManifest *backup.Manifest
-	if len(tags) > 0 {
-		fmt.Println("Checking for previous backup...")
-		prevManifest, err = c.GetLatestManifest(ctx, tags)
-		if err != nil {
-			fmt.Printf("Warning: could not fetch previous manifest: %v\n", err)
-		} else if prevManifest != nil {
-			fmt.Printf("Found previous backup: %s\n", prevManifest.ID)
-		}
+	fmt.Println("Checking for previous backup...")
+	prevManifest, err = c.GetLatestManifest(ctx, tags)
+	if err != nil {
+		fmt.Printf("Warning: could not fetch previous manifest: %v\n", err)
+	} else if prevManifest != nil {
+		fmt.Printf("Found previous backup: %s (will use for incremental)\n", prevManifest.ID)
+	} else {
+		fmt.Println("No previous backup found, creating full backup")
 	}
+	fmt.Println()
 
 	// Create backup
 	creator := backup.NewCreator(c, createConcurrency)
@@ -90,12 +94,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Upload manifest
-	fmt.Println("Uploading manifest...")
+	fmt.Println("\nUploading manifest...")
 	if err := c.UploadManifest(ctx, manifest); err != nil {
 		return fmt.Errorf("failed to upload manifest: %w", err)
 	}
 
-	fmt.Printf("Backup complete: %s\n", manifest.ID)
+	fmt.Printf("\nManifest ID: %s\n", manifest.ID)
 	fmt.Printf("Total entries: %d\n", len(manifest.Entries))
 
 	return nil

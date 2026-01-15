@@ -6,12 +6,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/johann/ib/internal/backup"
 	"github.com/johann/ib/internal/config"
+)
+
+const (
+	maxRetries     = 5
+	baseRetryDelay = 1 * time.Second
+	maxRetryDelay  = 30 * time.Second
 )
 
 // Client is an HTTP client for the backup server
@@ -38,50 +46,99 @@ func New(cfg *config.ClientConfig) (*Client, error) {
 
 // BlockExists checks if a block exists on the server
 func (c *Client) BlockExists(ctx context.Context, cid string) (bool, error) {
-	req, err := c.newRequest(ctx, "POST", fmt.Sprintf("/api/blocks/%s/exists", cid), nil)
-	if err != nil {
-		return false, err
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := retryDelay(attempt - 1)
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := c.newRequest(ctx, "POST", fmt.Sprintf("/api/blocks/%s/exists", cid), nil)
+		if err != nil {
+			return false, err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if isRetryableError(err) {
+				lastErr = err
+				continue
+			}
+			return false, err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			return true, nil
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		if isRetryableStatus(resp.StatusCode) {
+			lastErr = fmt.Errorf("server returned %d", resp.StatusCode)
+			continue
+		}
+
+		return false, fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		return true, nil
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return false, nil
-	}
-
-	return false, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	return false, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
 // UploadBlock uploads a block to the server
 func (c *Client) UploadBlock(ctx context.Context, cid string, data []byte, originalSize int64) error {
-	req, err := c.newRequest(ctx, "POST", "/api/blocks", bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
+	var lastErr error
 
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("X-Block-CID", cid)
-	req.Header.Set("X-Original-Size", fmt.Sprintf("%d", originalSize))
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := retryDelay(attempt - 1)
+			fmt.Printf("  Retrying upload (attempt %d/%d) after %v...\n", attempt+1, maxRetries, delay.Round(time.Millisecond))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+		req, err := c.newRequest(ctx, "POST", "/api/blocks", bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("X-Block-CID", cid)
+		req.Header.Set("X-Original-Size", fmt.Sprintf("%d", originalSize))
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if isRetryableError(err) {
+				lastErr = err
+				continue
+			}
+			return err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+			return nil
+		}
+
+		if isRetryableStatus(resp.StatusCode) {
+			body, _ := io.ReadAll(resp.Body)
+			lastErr = fmt.Errorf("server returned %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload failed: %d - %s", resp.StatusCode, string(body))
 	}
 
-	return nil
+	return fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
 // DownloadBlock downloads a block from the server
@@ -244,6 +301,42 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	}
 
 	return req, nil
+}
+
+// isRetryableError checks if an error should trigger a retry
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// HTTP/2 rate limiting errors
+	if strings.Contains(errStr, "ENHANCE_YOUR_CALM") ||
+		strings.Contains(errStr, "GOAWAY") ||
+		strings.Contains(errStr, "stream error") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") {
+		return true
+	}
+	return false
+}
+
+// isRetryableStatus checks if an HTTP status code should trigger a retry
+func isRetryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusBadGateway ||
+		status == http.StatusGatewayTimeout
+}
+
+// retryDelay calculates the delay before the next retry with jitter
+func retryDelay(attempt int) time.Duration {
+	delay := baseRetryDelay * time.Duration(1<<uint(attempt)) // Exponential backoff
+	if delay > maxRetryDelay {
+		delay = maxRetryDelay
+	}
+	// Add jitter: 50-100% of the delay
+	jitter := time.Duration(rand.Int63n(int64(delay / 2)))
+	return delay/2 + jitter
 }
 
 // ManifestInfo contains basic manifest information
