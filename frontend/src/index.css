@@ -777,6 +777,21 @@ code {
     background: #1e3a5f;
   }
 
+  .cid-display code {
+    background: #334155;
+    color: #e2e8f0;
+  }
+
+  .copy-btn {
+    border-color: #475569;
+    color: #94a3b8;
+  }
+
+  .copy-btn:hover {
+    background: #334155;
+    color: #e2e8f0;
+  }
+
   .notes-section {
     border-color: #334155;
   }

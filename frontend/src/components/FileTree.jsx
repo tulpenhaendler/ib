@@ -69,14 +69,12 @@ function TreeNode({ node, manifestId, depth = 0 }) {
         <span class="tree-actions">
           {isDir && node.path ? (
             <>
-              <a href={getFolderDownloadUrl(manifestId, node.path, 'tar.gz')} class="tree-btn" title="Download .tar.gz" onClick={(e) => e.stopPropagation()}>.tar.gz</a>
-              <a href={getFolderDownloadUrl(manifestId, node.path, 'zip')} class="tree-btn" title="Download .zip" onClick={(e) => e.stopPropagation()}>.zip</a>
+              <a href={getFolderDownloadUrl(manifestId, node.path, 'tar.gz')} download class="tree-btn" title="Download .tar.gz" onClick={(e) => e.stopPropagation()}>.tar.gz</a>
+              <a href={getFolderDownloadUrl(manifestId, node.path, 'zip')} download class="tree-btn" title="Download .zip" onClick={(e) => e.stopPropagation()}>.zip</a>
             </>
           ) : !isDir && node.path ? (
             <>
-              <a href={getFileDownloadUrl(manifestId, node.path)} class="tree-btn" title="Download raw" onClick={(e) => e.stopPropagation()}>raw</a>
-              <a href={getFolderDownloadUrl(manifestId, node.path, 'tar.gz')} class="tree-btn" title="Download .tar.gz" onClick={(e) => e.stopPropagation()}>.tar.gz</a>
-              <a href={getFolderDownloadUrl(manifestId, node.path, 'zip')} class="tree-btn" title="Download .zip" onClick={(e) => e.stopPropagation()}>.zip</a>
+              <a href={getFileDownloadUrl(manifestId, node.path)} download class="tree-btn" title="Download raw" onClick={(e) => e.stopPropagation()}>raw</a>
             </>
           ) : null}
         </span>

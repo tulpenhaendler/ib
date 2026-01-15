@@ -118,7 +118,7 @@ func (c *Creator) Create(ctx context.Context, rootPath string, tags map[string]s
 				if prevEntry.Mtime == entry.Mtime && prevEntry.Size == entry.Size {
 					// File unchanged, reuse blocks from previous manifest
 					entry.Blocks = prevEntry.Blocks
-					manifest.AddEntry(*entry)
+					// Don't add to manifest here - the final loop will add all files
 					atomic.AddInt64(&progress.ProcessedFiles, 1)
 					atomic.AddInt64(&progress.SkippedFiles, 1)
 					atomic.AddInt64(&progress.SkippedBytes, entry.Size)

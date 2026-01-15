@@ -203,11 +203,11 @@ export function Detail({ id }) {
               Download the entire backup as an archive:
             </p>
             <div class="download-buttons">
-              <a href={getDownloadUrl(manifestId, 'tar.gz')} class="btn btn-primary">
+              <a href={getDownloadUrl(manifestId, 'tar.gz')} download class="btn btn-primary">
                 <DownloadIcon />
                 Download .tar.gz
               </a>
-              <a href={getDownloadUrl(manifestId, 'zip')} class="btn btn-secondary">
+              <a href={getDownloadUrl(manifestId, 'zip')} download class="btn btn-secondary">
                 <DownloadIcon />
                 Download .zip
               </a>
