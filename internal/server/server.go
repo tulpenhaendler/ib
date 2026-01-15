@@ -3,12 +3,16 @@ package server
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ipfs/go-cid"
+	"github.com/johann/ib/internal/backup"
 	"github.com/johann/ib/internal/config"
+	"github.com/johann/ib/internal/ipfsnode"
 	"github.com/johann/ib/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -33,6 +37,7 @@ type Server struct {
 	metricsPort int
 	metrics     *Metrics
 	title       string
+	ipfsNode    *ipfsnode.Node
 }
 
 // New creates a new server instance
@@ -55,6 +60,31 @@ func New(cfg *config.ServerConfig, metricsPort int, title string) (*Server, erro
 		title:       title,
 	}
 
+	// Start IPFS node if enabled
+	if cfg.IPFSEnabled {
+		ipfsCfg := ipfsnode.DefaultConfig()
+		if len(cfg.IPFSListenAddrs) > 0 {
+			ipfsCfg.ListenAddrs = cfg.IPFSListenAddrs
+		}
+		if cfg.IPFSGatewayAddr != "" {
+			ipfsCfg.GatewayAddr = cfg.IPFSGatewayAddr
+		}
+
+		ipfsNode, err := ipfsnode.NewNode(context.Background(), store, ipfsCfg)
+		if err != nil {
+			store.Close()
+			return nil, fmt.Errorf("failed to start IPFS node: %w", err)
+		}
+		s.ipfsNode = ipfsNode
+		fmt.Printf("IPFS node started: %s\n", ipfsNode.PeerID())
+		for _, addr := range ipfsNode.Addrs() {
+			fmt.Printf("  Listening: %s/p2p/%s\n", addr, ipfsNode.PeerID())
+		}
+		if cfg.IPFSGatewayAddr != "" {
+			fmt.Printf("  Gateway: http://localhost%s/ipfs/<cid>\n", cfg.IPFSGatewayAddr)
+		}
+	}
+
 	s.setupRoutes()
 
 	return s, nil
@@ -70,7 +100,68 @@ func (s *Server) Run() error {
 	// Start pruning job
 	go s.runPruner()
 
+	// Load existing root CIDs for IPFS if enabled
+	if s.ipfsNode != nil {
+		go s.loadExistingRootCIDs()
+	}
+
 	return s.router.Run(s.config.ListenAddr)
+}
+
+// loadExistingRootCIDs loads root CIDs from existing manifests and advertises them
+func (s *Server) loadExistingRootCIDs() {
+	ctx := context.Background()
+
+	manifests, err := s.storage.ListManifests(ctx, nil)
+	if err != nil {
+		fmt.Printf("Warning: failed to list manifests for IPFS: %v\n", err)
+		return
+	}
+
+	var loaded int
+	for _, info := range manifests {
+		data, err := s.storage.GetManifest(ctx, info.ID)
+		if err != nil {
+			continue
+		}
+
+		// Decompress
+		decompressed, err := backup.Decompress(data, int64(len(data)*10))
+		if err != nil {
+			decompressed = data
+		}
+
+		var manifest struct {
+			RootCID string `json:"root_cid"`
+		}
+		if err := json.Unmarshal(decompressed, &manifest); err != nil {
+			continue
+		}
+
+		if manifest.RootCID != "" {
+			if c, err := cid.Decode(manifest.RootCID); err == nil {
+				s.ipfsNode.AddRootCID(c)
+				loaded++
+			}
+		}
+	}
+
+	if loaded > 0 {
+		fmt.Printf("Loaded %d root CIDs for IPFS\n", loaded)
+		if err := s.ipfsNode.AdvertiseRoots(ctx); err != nil {
+			fmt.Printf("Warning: failed to advertise root CIDs: %v\n", err)
+		}
+	}
+}
+
+// Close shuts down the server
+func (s *Server) Close() error {
+	if s.ipfsNode != nil {
+		if err := s.ipfsNode.Close(); err != nil {
+			fmt.Printf("Warning: failed to close IPFS node: %v\n", err)
+		}
+	}
+	return s.storage.Close()
 }
 
 func (s *Server) setupRoutes() {
@@ -83,7 +174,11 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/api/manifests/:id", s.handleGetManifest)
 	s.router.GET("/api/manifests/latest", s.handleGetLatestManifest)
 	s.router.GET("/api/blocks/:cid", s.handleGetBlock)
-	s.router.GET("/api/download/:manifest_id/*path", s.handleDownload)
+
+	// Download endpoints - specific routes first, then generic
+	s.router.GET("/api/download/:manifest_id/file/*path", s.handleDownloadFile)
+	s.router.GET("/api/download/:manifest_id/folder/*path", s.handleDownloadFolder)
+	s.router.GET("/api/download/:manifest_id", s.handleDownload)
 
 	// CLI binary downloads
 	s.router.GET("/cli/:os/:arch", s.handleCLIDownload)

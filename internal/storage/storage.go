@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +16,20 @@ import (
 const (
 	// InlineThreshold is the max size for inline storage in SQLite
 	InlineThreshold = 256 * 1024 // 256KB
+
+	// S3PathPrefix is the base path for blocks in S3
+	S3PathPrefix = "backups/ib"
 )
+
+// blockS3Key generates the S3 key for a block: backups/ib/{hash prefix}/{cid}.lz4
+// Uses 2 chars from position 8 of the CID (in the hash portion, after "bafkrei")
+func blockS3Key(cid string) string {
+	prefix := "00"
+	if len(cid) >= 10 {
+		prefix = strings.ToLower(cid[8:10])
+	}
+	return fmt.Sprintf("%s/%s/%s.lz4", S3PathPrefix, prefix, cid)
+}
 
 // Storage handles manifest and block persistence
 type Storage struct {
@@ -89,6 +103,19 @@ func (s *Storage) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_manifests_created_at ON manifests(created_at);
 	CREATE INDEX IF NOT EXISTS idx_block_refs_cid ON block_refs(cid);
+
+	CREATE TABLE IF NOT EXISTS nodes (
+		cid TEXT PRIMARY KEY,
+		data BLOB NOT NULL,
+		created_at INTEGER NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS node_refs (
+		manifest_id TEXT NOT NULL,
+		cid TEXT NOT NULL,
+		PRIMARY KEY (manifest_id, cid),
+		FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE
+	);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -108,7 +135,7 @@ func (s *Storage) SaveBlock(ctx context.Context, cid string, data []byte, origin
 	if len(data) < InlineThreshold {
 		inlineData = data
 	} else {
-		s3Key = cid
+		s3Key = blockS3Key(cid)
 		if err := s.s3.Put(ctx, s3Key, data); err != nil {
 			return fmt.Errorf("failed to upload to S3: %w", err)
 		}
@@ -128,11 +155,11 @@ func (s *Storage) SaveBlock(ctx context.Context, cid string, data []byte, origin
 // GetBlock retrieves a block from storage
 func (s *Storage) GetBlock(ctx context.Context, cid string) ([]byte, error) {
 	var inlineData []byte
-	var s3Key sql.NullString
+	var hasS3 bool
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT inline_data, s3_key FROM blocks WHERE cid = ?
-	`, cid).Scan(&inlineData, &s3Key)
+		SELECT inline_data, (s3_key IS NOT NULL AND s3_key != '') FROM blocks WHERE cid = ?
+	`, cid).Scan(&inlineData, &hasS3)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("block not found: %s", cid)
@@ -145,8 +172,8 @@ func (s *Storage) GetBlock(ctx context.Context, cid string) ([]byte, error) {
 		return inlineData, nil
 	}
 
-	if s3Key.Valid {
-		return s.s3.Get(ctx, s3Key.String)
+	if hasS3 {
+		return s.s3.Get(ctx, blockS3Key(cid))
 	}
 
 	return nil, fmt.Errorf("block has no data: %s", cid)
@@ -159,8 +186,38 @@ func (s *Storage) BlockExists(ctx context.Context, cid string) (bool, error) {
 	return count > 0, err
 }
 
-// SaveManifest saves a manifest
-func (s *Storage) SaveManifest(ctx context.Context, manifest *backup.Manifest, data []byte) error {
+// SaveNode saves a dag-pb node (file or directory node)
+func (s *Storage) SaveNode(ctx context.Context, cid string, data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO nodes (cid, data, created_at)
+		VALUES (?, ?, ?)
+	`, cid, data, time.Now().Unix())
+
+	return err
+}
+
+// GetNode retrieves a dag-pb node
+func (s *Storage) GetNode(ctx context.Context, cid string) ([]byte, error) {
+	var data []byte
+	err := s.db.QueryRowContext(ctx, `SELECT data FROM nodes WHERE cid = ?`, cid).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("node not found: %s", cid)
+	}
+	return data, err
+}
+
+// NodeExists checks if a node exists
+func (s *Storage) NodeExists(ctx context.Context, cid string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE cid = ?`, cid).Scan(&count)
+	return count > 0, err
+}
+
+// SaveManifest saves a manifest with optional node CIDs for reference tracking
+func (s *Storage) SaveManifest(ctx context.Context, manifest *backup.Manifest, data []byte, nodeCIDs []string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -194,6 +251,17 @@ func (s *Storage) SaveManifest(ctx context.Context, manifest *backup.Manifest, d
 			if err != nil {
 				return err
 			}
+		}
+	}
+
+	// Save node references (for IPFS DAG nodes)
+	for _, cid := range nodeCIDs {
+		_, err = tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO node_refs (manifest_id, cid)
+			VALUES (?, ?)
+		`, manifest.ID, cid)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -285,7 +353,7 @@ func (s *Storage) PruneManifests(ctx context.Context, cutoff time.Time) error {
 func (s *Storage) pruneOrphanedBlocksLocked(ctx context.Context) error {
 	// Find blocks with no references
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT b.cid, b.s3_key FROM blocks b
+		SELECT b.cid, (b.s3_key IS NOT NULL AND b.s3_key != '') as has_s3 FROM blocks b
 		LEFT JOIN block_refs br ON b.cid = br.cid
 		WHERE br.cid IS NULL
 	`)
@@ -295,28 +363,29 @@ func (s *Storage) pruneOrphanedBlocksLocked(ctx context.Context) error {
 	defer rows.Close()
 
 	var toDelete []string
-	var s3Keys []string
+	var s3Cids []string
 
 	for rows.Next() {
 		var cid string
-		var s3Key sql.NullString
-		if err := rows.Scan(&cid, &s3Key); err != nil {
+		var hasS3 bool
+		if err := rows.Scan(&cid, &hasS3); err != nil {
 			return err
 		}
 		toDelete = append(toDelete, cid)
-		if s3Key.Valid && s3Key.String != "" {
-			s3Keys = append(s3Keys, s3Key.String)
+		if hasS3 {
+			s3Cids = append(s3Cids, cid)
 		}
 	}
 
 	// Delete from S3
-	for _, key := range s3Keys {
+	for _, cid := range s3Cids {
+		key := blockS3Key(cid)
 		if err := s.s3.Delete(ctx, key); err != nil {
 			fmt.Printf("Warning: failed to delete S3 object %s: %v\n", key, err)
 		}
 	}
 
-	// Delete from SQLite
+	// Delete blocks from SQLite
 	for _, cid := range toDelete {
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM blocks WHERE cid = ?`, cid); err != nil {
 			return err
@@ -325,6 +394,37 @@ func (s *Storage) pruneOrphanedBlocksLocked(ctx context.Context) error {
 
 	if len(toDelete) > 0 {
 		fmt.Printf("Pruned %d orphaned blocks\n", len(toDelete))
+	}
+
+	// Find and delete orphaned nodes (dag-pb nodes)
+	nodeRows, err := s.db.QueryContext(ctx, `
+		SELECT n.cid FROM nodes n
+		LEFT JOIN node_refs nr ON n.cid = nr.cid
+		WHERE nr.cid IS NULL
+	`)
+	if err != nil {
+		return err
+	}
+	defer nodeRows.Close()
+
+	var nodesToDelete []string
+	for nodeRows.Next() {
+		var cid string
+		if err := nodeRows.Scan(&cid); err != nil {
+			return err
+		}
+		nodesToDelete = append(nodesToDelete, cid)
+	}
+
+	// Delete orphaned nodes
+	for _, cid := range nodesToDelete {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE cid = ?`, cid); err != nil {
+			return err
+		}
+	}
+
+	if len(nodesToDelete) > 0 {
+		fmt.Printf("Pruned %d orphaned nodes\n", len(nodesToDelete))
 	}
 
 	return nil

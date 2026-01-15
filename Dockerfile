@@ -45,11 +45,16 @@ RUN mkdir -p /data
 ENV IB_DB_PATH=/data/ib.db \
     IB_LISTEN_ADDR=:8080 \
     IB_RETENTION_DAYS=90 \
-    IB_S3_REGION=us-east-1
+    IB_S3_REGION=us-east-1 \
+    IB_IPFS_ENABLED=false \
+    IB_IPFS_GATEWAY_ADDR=:8081
 
 # Expose ports
 EXPOSE 8080
 EXPOSE 9090
+EXPOSE 8081
+EXPOSE 4001
+EXPOSE 4001/udp
 
 # Volume for SQLite database
 VOLUME ["/data"]

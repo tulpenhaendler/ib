@@ -13,6 +13,7 @@ A fast, deduplicated backup tool with content-addressed storage. Built for backi
 - **Streaming downloads** - Download as .tar.gz or .zip without server-side buffering
 - **Tag-based organization** - Filter backups by custom tags (project, version, node, etc.)
 - **Auto-pruning** - Configurable retention policy with automatic cleanup
+- **IPFS integration** - Optional embedded IPFS node for peer-to-peer distribution
 
 ## Quick Start
 
@@ -63,7 +64,10 @@ services:
   ib-server:
     image: ib-server
     ports:
-      - "8080:8080"
+      - "8080:8080"      # HTTP API and Web UI
+      - "8081:8081"      # IPFS HTTP Gateway (optional)
+      - "4001:4001"      # IPFS libp2p TCP
+      - "4001:4001/udp"  # IPFS libp2p QUIC
     volumes:
       - ib-data:/data
     environment:
@@ -74,6 +78,9 @@ services:
       IB_S3_SECRET_KEY: "minioadmin"
       IB_TITLE: "My Backups"
       IB_RETENTION_DAYS: "90"
+      # IPFS settings (optional)
+      IB_IPFS_ENABLED: "true"
+      IB_IPFS_GATEWAY_ADDR: ":8081"
 ```
 
 ## Configuration
@@ -93,6 +100,17 @@ services:
 | `IB_TITLE` | Web UI title | `ib Backup` |
 | `IB_RETENTION_DAYS` | Days to keep backups | `90` |
 | `IB_METRICS_PORT` | Prometheus metrics port | Disabled |
+| `IB_IPFS_ENABLED` | Enable embedded IPFS node | `false` |
+| `IB_IPFS_GATEWAY_ADDR` | IPFS HTTP gateway address | `:8081` |
+
+### Ports
+
+| Port | Protocol | Description |
+|------|----------|-------------|
+| 8080 | TCP | HTTP API and Web UI |
+| 8081 | TCP | IPFS HTTP Gateway (when enabled) |
+| 4001 | TCP | IPFS libp2p (peer connections) |
+| 4001 | UDP | IPFS libp2p QUIC (faster peer connections) |
 
 ## Architecture
 
@@ -102,17 +120,45 @@ services:
 │  (ib CLI)   │     │ (ib-server) │     │   Storage   │
 └─────────────┘     └─────────────┘     └─────────────┘
                            │
-                           ▼
-                    ┌─────────────┐
-                    │   SQLite    │
-                    │  (metadata) │
-                    └─────────────┘
+                    ┌──────┴──────┐
+                    ▼             ▼
+             ┌───────────┐  ┌───────────┐
+             │  SQLite   │  │   IPFS    │
+             │ (metadata)│  │   Node    │
+             └───────────┘  └───────────┘
+                                  │
+                           ┌──────┴──────┐
+                           ▼             ▼
+                    ┌───────────┐  ┌───────────┐
+                    │  libp2p   │  │  Gateway  │
+                    │   DHT     │  │   HTTP    │
+                    └───────────┘  └───────────┘
 ```
 
 - **Blocks < 256KB**: Stored inline in SQLite
 - **Blocks >= 256KB**: Stored in S3, referenced by CID
 - **Manifests**: Compressed JSON stored in SQLite
-- **Chunking**: 128MB fixed-size blocks
+- **Chunking**: 8MB fixed-size blocks (IPFS-compatible)
+- **DAG Nodes**: UnixFS directory/file structures stored in SQLite
+
+## IPFS Integration
+
+When IPFS is enabled, each backup gets a root CID that represents the entire directory structure. This allows:
+
+- **P2P distribution**: Other IPFS nodes can fetch backups directly
+- **Public gateway access**: Access via `https://ipfs.io/ipfs/<root_cid>`
+- **Local gateway**: Access via `http://localhost:8081/ipfs/<root_cid>`
+- **Content verification**: All data is cryptographically verified by CID
+
+The server only advertises root CIDs to the DHT, not individual blocks, keeping DHT overhead minimal even for large backups.
+
+```bash
+# Enable IPFS when starting the server
+IB_IPFS_ENABLED=true ./ib-server serve
+
+# Access a backup via IPFS
+curl http://localhost:8081/ipfs/bafybeig.../<path/to/file>
+```
 
 ## API Endpoints
 

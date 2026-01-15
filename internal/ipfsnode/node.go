@@ -1,0 +1,211 @@
+package ipfsnode
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/ipfs/boxo/bitswap"
+	bsnet "github.com/ipfs/boxo/bitswap/network"
+	"github.com/ipfs/boxo/blockservice"
+	"github.com/ipfs/boxo/gateway"
+	"github.com/ipfs/boxo/ipld/merkledag"
+	"github.com/ipfs/go-cid"
+	format "github.com/ipfs/go-ipld-format"
+	"github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/routing"
+	"github.com/multiformats/go-multiaddr"
+)
+
+// Node represents an embedded IPFS node
+type Node struct {
+	host       host.Host
+	dht        *dht.IpfsDHT
+	blockstore *Blockstore
+	bswap      *bitswap.Bitswap
+	dagService format.DAGService
+	gateway    *http.Server
+
+	// Root CIDs to advertise
+	rootCIDs []cid.Cid
+}
+
+// Config for the IPFS node
+type Config struct {
+	ListenAddrs    []string // libp2p listen addresses
+	GatewayAddr    string   // HTTP gateway address (e.g., ":8080")
+	BootstrapPeers []string // Bootstrap peer addresses
+}
+
+// DefaultConfig returns a default configuration
+func DefaultConfig() *Config {
+	return &Config{
+		ListenAddrs: []string{
+			"/ip4/0.0.0.0/tcp/4001",
+			"/ip4/0.0.0.0/udp/4001/quic-v1",
+		},
+		GatewayAddr: ":8080",
+		BootstrapPeers: []string{
+			// IPFS bootstrap nodes
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+		},
+	}
+}
+
+// NewNode creates a new IPFS node
+func NewNode(ctx context.Context, storage StorageBackend, cfg *Config) (*Node, error) {
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
+
+	// Create blockstore
+	blockstore := NewBlockstore(storage)
+
+	// Parse listen addresses
+	var listenAddrs []multiaddr.Multiaddr
+	for _, addr := range cfg.ListenAddrs {
+		ma, err := multiaddr.NewMultiaddr(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid listen address %s: %w", addr, err)
+		}
+		listenAddrs = append(listenAddrs, ma)
+	}
+
+	// Create libp2p host with DHT
+	var dhtInstance *dht.IpfsDHT
+	h, err := libp2p.New(
+		libp2p.ListenAddrs(listenAddrs...),
+		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+			var err error
+			dhtInstance, err = dht.New(ctx, h, dht.Mode(dht.ModeServer))
+			return dhtInstance, err
+		}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
+	}
+
+	// Bootstrap DHT
+	if err := dhtInstance.Bootstrap(ctx); err != nil {
+		return nil, fmt.Errorf("failed to bootstrap DHT: %w", err)
+	}
+
+	// Connect to bootstrap peers
+	for _, addrStr := range cfg.BootstrapPeers {
+		addr, err := multiaddr.NewMultiaddr(addrStr)
+		if err != nil {
+			continue
+		}
+		peerInfo, err := peer.AddrInfoFromP2pAddr(addr)
+		if err != nil {
+			continue
+		}
+		go func(pi peer.AddrInfo) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h.Connect(ctx, pi)
+		}(*peerInfo)
+	}
+
+	// Create bitswap network and exchange
+	bsNetwork := bsnet.NewFromIpfsHost(h, dhtInstance)
+	bswap := bitswap.New(ctx, bsNetwork, blockstore)
+
+	// Create block service and DAG service
+	blockService := blockservice.New(blockstore, bswap)
+	dagService := merkledag.NewDAGService(blockService)
+
+	node := &Node{
+		host:       h,
+		dht:        dhtInstance,
+		blockstore: blockstore,
+		bswap:      bswap,
+		dagService: dagService,
+	}
+
+	// Start HTTP gateway if configured
+	if cfg.GatewayAddr != "" {
+		if err := node.startGateway(cfg.GatewayAddr); err != nil {
+			node.Close()
+			return nil, fmt.Errorf("failed to start gateway: %w", err)
+		}
+	}
+
+	return node, nil
+}
+
+func (n *Node) startGateway(addr string) error {
+	// Create gateway backend
+	backend, err := gateway.NewBlocksBackend(
+		blockservice.New(n.blockstore, n.bswap),
+		gateway.WithValueStore(n.dht),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Create gateway handler
+	gwHandler := gateway.NewHandler(gateway.Config{
+		DeserializedResponses: true,
+	}, backend)
+
+	mux := http.NewServeMux()
+	mux.Handle("/ipfs/", gwHandler)
+
+	n.gateway = &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go n.gateway.ListenAndServe()
+	return nil
+}
+
+// AddRootCID adds a CID to be advertised to the DHT
+func (n *Node) AddRootCID(c cid.Cid) {
+	n.rootCIDs = append(n.rootCIDs, c)
+}
+
+// AdvertiseRoots advertises all root CIDs to the DHT
+func (n *Node) AdvertiseRoots(ctx context.Context) error {
+	for _, c := range n.rootCIDs {
+		if err := n.dht.Provide(ctx, c, true); err != nil {
+			return fmt.Errorf("failed to provide %s: %w", c, err)
+		}
+	}
+	return nil
+}
+
+// PeerID returns the node's peer ID
+func (n *Node) PeerID() peer.ID {
+	return n.host.ID()
+}
+
+// Addrs returns the node's listen addresses
+func (n *Node) Addrs() []multiaddr.Multiaddr {
+	return n.host.Addrs()
+}
+
+// Close shuts down the node
+func (n *Node) Close() error {
+	if n.gateway != nil {
+		n.gateway.Close()
+	}
+	if n.bswap != nil {
+		n.bswap.Close()
+	}
+	if n.dht != nil {
+		n.dht.Close()
+	}
+	if n.host != nil {
+		n.host.Close()
+	}
+	return nil
+}

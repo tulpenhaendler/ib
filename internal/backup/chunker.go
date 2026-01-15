@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	// ChunkSize is the maximum size of a chunk (128MB)
-	ChunkSize = 128 * 1024 * 1024
+	// ChunkSize is the maximum size of a chunk (8MB)
+	ChunkSize = 8 * 1024 * 1024
 )
 
 // ChunkResult represents a processed chunk

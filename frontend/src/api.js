@@ -21,3 +21,11 @@ export async function fetchManifest(id) {
 export function getDownloadUrl(id, format) {
   return `${API_BASE}/download/${id}.${format}`
 }
+
+export function getFileDownloadUrl(manifestId, path) {
+  return `${API_BASE}/download/${manifestId}/file/${path}`
+}
+
+export function getFolderDownloadUrl(manifestId, path, format = 'tar.gz') {
+  return `${API_BASE}/download/${manifestId}/folder/${path}.${format}`
+}

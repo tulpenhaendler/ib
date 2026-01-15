@@ -4,14 +4,19 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ipfs/go-cid"
 	"github.com/johann/ib/internal/backup"
+	"github.com/johann/ib/internal/ipfsnode"
 )
 
 func (s *Server) handleListManifests(c *gin.Context) {
@@ -90,7 +95,20 @@ func (s *Server) handleCreateManifest(c *gin.Context) {
 		return
 	}
 
-	// Serialize and compress manifest
+	ctx := c.Request.Context()
+
+	// Build IPFS DAG structure and collect node CIDs
+	nodeCollector := ipfsnode.NewNodeCollector(s.storage)
+	rootCID, err := ipfsnode.BuildManifestDAG(ctx, &manifest, nodeCollector)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to build DAG: %v", err)})
+		return
+	}
+
+	// Update manifest with root CID (BuildManifestDAG already does this, but be explicit)
+	manifest.RootCID = rootCID.String()
+
+	// Serialize and compress manifest (after DAG building so it includes CIDs)
 	data, err := json.Marshal(manifest)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to serialize manifest"})
@@ -100,14 +118,29 @@ func (s *Server) handleCreateManifest(c *gin.Context) {
 	// Compress the manifest data
 	compressed := compressData(data)
 
-	if err := s.storage.SaveManifest(c.Request.Context(), &manifest, compressed); err != nil {
+	// Save manifest with node references
+	nodeCIDs := nodeCollector.NodeCIDs()
+	if err := s.storage.SaveManifest(ctx, &manifest, compressed, nodeCIDs); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	s.metrics.manifestsTotal.Inc()
 
-	c.JSON(http.StatusCreated, gin.H{"id": manifest.ID})
+	// Advertise root CID to DHT if IPFS is enabled
+	if s.ipfsNode != nil && manifest.RootCID != "" {
+		if rootCIDParsed, err := cid.Decode(manifest.RootCID); err == nil {
+			s.ipfsNode.AddRootCID(rootCIDParsed)
+			// Advertise in background to not block the response
+			go func() {
+				if err := s.ipfsNode.AdvertiseRoots(context.Background()); err != nil {
+					fmt.Printf("Warning: failed to advertise root CID: %v\n", err)
+				}
+			}()
+		}
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"id": manifest.ID, "root_cid": manifest.RootCID})
 }
 
 func (s *Server) handleDeleteManifest(c *gin.Context) {
@@ -188,12 +221,12 @@ func (s *Server) handleUploadBlock(c *gin.Context) {
 func (s *Server) handleDownload(c *gin.Context) {
 	manifestID := c.Param("manifest_id")
 
-	// Parse format from extension
+	// Parse format from extension (e.g., /api/download/abc123.tar.gz)
 	format := "tar.gz"
 	if strings.HasSuffix(manifestID, ".zip") {
 		format = "zip"
 		manifestID = strings.TrimSuffix(manifestID, ".zip")
-	} else if strings.HasSuffix(manifestID, ".tar.gz") {
+	} else {
 		manifestID = strings.TrimSuffix(manifestID, ".tar.gz")
 	}
 
@@ -229,9 +262,162 @@ func (s *Server) handleDownload(c *gin.Context) {
 
 	// Stream the archive
 	if format == "zip" {
-		s.streamZip(c, &manifest)
+		s.streamZip(c, &manifest, "")
 	} else {
-		s.streamTarGz(c, &manifest)
+		s.streamTarGz(c, &manifest, "")
+	}
+}
+
+func (s *Server) handleDownloadFile(c *gin.Context) {
+	manifestID := c.Param("manifest_id")
+	filePath := c.Param("path")
+	// Remove leading slash from wildcard param
+	filePath = strings.TrimPrefix(filePath, "/")
+
+	// Get manifest
+	data, err := s.storage.GetManifest(c.Request.Context(), manifestID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "manifest not found"})
+		return
+	}
+
+	// Decompress manifest
+	decompressed, err := backup.Decompress(data, int64(len(data)*10))
+	if err != nil {
+		decompressed = data
+	}
+
+	var manifest backup.Manifest
+	if err := json.Unmarshal(decompressed, &manifest); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse manifest"})
+		return
+	}
+
+	// Find the entry
+	var targetEntry *backup.Entry
+	for i := range manifest.Entries {
+		if manifest.Entries[i].Path == filePath {
+			targetEntry = &manifest.Entries[i]
+			break
+		}
+	}
+
+	if targetEntry == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found in backup"})
+		return
+	}
+
+	if targetEntry.Type != backup.FileTypeFile {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path is not a file"})
+		return
+	}
+
+	// Set headers
+	filename := filepath.Base(filePath)
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Content-Disposition", "attachment; filename="+filename)
+	c.Header("Content-Length", strconv.FormatInt(targetEntry.Size, 10))
+
+	// Stream the file blocks
+	ctx := c.Request.Context()
+	for _, cid := range targetEntry.Blocks {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		blockData, err := s.storage.GetBlock(ctx, cid)
+		if err != nil {
+			continue
+		}
+
+		decompressed, err := backup.Decompress(blockData, backup.ChunkSize)
+		if err != nil {
+			c.Writer.Write(blockData)
+		} else {
+			c.Writer.Write(decompressed)
+		}
+	}
+
+	s.metrics.bandwidthDownload.Add(float64(targetEntry.Size))
+}
+
+func (s *Server) handleDownloadFolder(c *gin.Context) {
+	manifestID := c.Param("manifest_id")
+	folderPath := c.Param("path")
+	// Remove leading slash from wildcard param
+	folderPath = strings.TrimPrefix(folderPath, "/")
+
+	// Parse format from extension
+	format := "tar.gz"
+	if strings.HasSuffix(folderPath, ".zip") {
+		format = "zip"
+		folderPath = strings.TrimSuffix(folderPath, ".zip")
+	} else if strings.HasSuffix(folderPath, ".tar.gz") {
+		folderPath = strings.TrimSuffix(folderPath, ".tar.gz")
+	}
+
+	// Get manifest
+	data, err := s.storage.GetManifest(c.Request.Context(), manifestID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "manifest not found"})
+		return
+	}
+
+	// Decompress manifest
+	decompressed, err := backup.Decompress(data, int64(len(data)*10))
+	if err != nil {
+		decompressed = data
+	}
+
+	var manifest backup.Manifest
+	if err := json.Unmarshal(decompressed, &manifest); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse manifest"})
+		return
+	}
+
+	// Filter entries to only include those in the folder
+	var filteredEntries []backup.Entry
+	folderPrefix := folderPath + "/"
+
+	for _, entry := range manifest.Entries {
+		// Include the folder itself or anything inside it
+		if entry.Path == folderPath || strings.HasPrefix(entry.Path, folderPrefix) {
+			filteredEntries = append(filteredEntries, entry)
+		}
+	}
+
+	if len(filteredEntries) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "folder not found in backup"})
+		return
+	}
+
+	// Create a filtered manifest
+	filteredManifest := &backup.Manifest{
+		ID:        manifest.ID,
+		Tags:      manifest.Tags,
+		CreatedAt: manifest.CreatedAt,
+		RootPath:  manifest.RootPath,
+		Entries:   filteredEntries,
+	}
+
+	// Set headers for download
+	filename := filepath.Base(folderPath)
+	if format == "zip" {
+		filename += ".zip"
+		c.Header("Content-Type", "application/zip")
+	} else {
+		filename += ".tar.gz"
+		c.Header("Content-Type", "application/gzip")
+	}
+	c.Header("Content-Disposition", "attachment; filename="+filename)
+
+	// Stream the archive with path prefix to strip
+	if format == "zip" {
+		s.streamZip(c, filteredManifest, folderPath)
+	} else {
+		s.streamTarGz(c, filteredManifest, folderPath)
 	}
 }
 
@@ -308,7 +494,7 @@ func compressData(data []byte) []byte {
 	return compressed[:n]
 }
 
-func (s *Server) streamTarGz(c *gin.Context, manifest *backup.Manifest) {
+func (s *Server) streamTarGz(c *gin.Context, manifest *backup.Manifest, stripPrefix string) {
 	gw := gzip.NewWriter(c.Writer)
 	defer gw.Close()
 
@@ -324,17 +510,28 @@ func (s *Server) streamTarGz(c *gin.Context, manifest *backup.Manifest) {
 		default:
 		}
 
+		// Calculate relative path by stripping prefix
+		entryPath := entry.Path
+		if stripPrefix != "" {
+			if entry.Path == stripPrefix {
+				// This is the root folder itself, use base name
+				entryPath = filepath.Base(entry.Path)
+			} else {
+				entryPath = strings.TrimPrefix(entry.Path, stripPrefix+"/")
+			}
+		}
+
 		switch entry.Type {
 		case backup.FileTypeDir:
 			tw.WriteHeader(&tar.Header{
-				Name:     entry.Path + "/",
+				Name:     entryPath + "/",
 				Mode:     int64(entry.Mode),
 				Typeflag: tar.TypeDir,
 			})
 
 		case backup.FileTypeSymlink:
 			tw.WriteHeader(&tar.Header{
-				Name:     entry.Path,
+				Name:     entryPath,
 				Mode:     int64(entry.Mode),
 				Typeflag: tar.TypeSymlink,
 				Linkname: entry.LinkTarget,
@@ -343,7 +540,7 @@ func (s *Server) streamTarGz(c *gin.Context, manifest *backup.Manifest) {
 		case backup.FileTypeFile:
 			// Write header first with known size from manifest
 			tw.WriteHeader(&tar.Header{
-				Name: entry.Path,
+				Name: entryPath,
 				Mode: int64(entry.Mode),
 				Size: entry.Size,
 			})
@@ -366,7 +563,7 @@ func (s *Server) streamTarGz(c *gin.Context, manifest *backup.Manifest) {
 	}
 }
 
-func (s *Server) streamZip(c *gin.Context, manifest *backup.Manifest) {
+func (s *Server) streamZip(c *gin.Context, manifest *backup.Manifest, stripPrefix string) {
 	zw := zip.NewWriter(c.Writer)
 	defer zw.Close()
 
@@ -379,19 +576,30 @@ func (s *Server) streamZip(c *gin.Context, manifest *backup.Manifest) {
 		default:
 		}
 
+		// Calculate relative path by stripping prefix
+		entryPath := entry.Path
+		if stripPrefix != "" {
+			if entry.Path == stripPrefix {
+				// This is the root folder itself, use base name
+				entryPath = filepath.Base(entry.Path)
+			} else {
+				entryPath = strings.TrimPrefix(entry.Path, stripPrefix+"/")
+			}
+		}
+
 		switch entry.Type {
 		case backup.FileTypeDir:
-			zw.Create(entry.Path + "/")
+			zw.Create(entryPath + "/")
 
 		case backup.FileTypeSymlink:
 			// Zip doesn't support symlinks well, create a small file with the target
-			w, _ := zw.Create(entry.Path + ".symlink")
+			w, _ := zw.Create(entryPath + ".symlink")
 			w.Write([]byte(entry.LinkTarget))
 
 		case backup.FileTypeFile:
 			// Use CreateHeader with known size for streaming
 			header := &zip.FileHeader{
-				Name:   entry.Path,
+				Name:   entryPath,
 				Method: zip.Deflate,
 			}
 			header.SetMode(0644)

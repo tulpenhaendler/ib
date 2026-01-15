@@ -32,6 +32,11 @@ type ServerConfig struct {
 	S3AccessKey string `json:"s3_access_key"`
 	S3SecretKey string `json:"s3_secret_key"`
 	S3Region    string `json:"s3_region"`
+
+	// IPFS configuration
+	IPFSEnabled     bool     `json:"ipfs_enabled"`
+	IPFSListenAddrs []string `json:"ipfs_listen_addrs,omitempty"`
+	IPFSGatewayAddr string   `json:"ipfs_gateway_addr,omitempty"`
 }
 
 // Dir returns the configuration directory path
@@ -139,6 +144,12 @@ func LoadServer() (*ServerConfig, error) {
 	}
 	if v := os.Getenv("IB_S3_REGION"); v != "" {
 		cfg.S3Region = v
+	}
+	if v := os.Getenv("IB_IPFS_ENABLED"); v != "" {
+		cfg.IPFSEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("IB_IPFS_GATEWAY_ADDR"); v != "" {
+		cfg.IPFSGatewayAddr = v
 	}
 
 	return cfg, nil

@@ -21,6 +21,7 @@ type Manifest struct {
 	Tags      map[string]string `json:"tags"`
 	CreatedAt time.Time         `json:"created_at"`
 	RootPath  string            `json:"root_path"`
+	RootCID   string            `json:"root_cid,omitempty"` // IPFS CID of the backup root directory
 	Entries   []Entry           `json:"entries"`
 }
 
@@ -31,7 +32,8 @@ type Entry struct {
 	Mode       uint32   `json:"mode"`                  // Unix permissions
 	Mtime      int64    `json:"mtime"`                 // Unix timestamp (nanoseconds)
 	Size       int64    `json:"size,omitempty"`        // Original size (files only)
-	Blocks     []string `json:"blocks,omitempty"`      // CID list (files only)
+	CID        string   `json:"cid,omitempty"`         // IPFS CID of this entry (for multi-block files, this is the file node CID)
+	Blocks     []string `json:"blocks,omitempty"`      // Raw block CIDs (files only)
 	LinkTarget string   `json:"link_target,omitempty"` // Symlink target (symlinks only)
 }
 
