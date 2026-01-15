@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'preact/hooks'
 import { Link } from 'preact-router/match'
 import { marked } from 'marked'
-import { fetchManifest, getDownloadUrl, getFileDownloadUrl } from '../api'
+import { fetchManifest, fetchManifests, getDownloadUrl, getFileDownloadUrl } from '../api'
 import { formatSize, formatRelativeDate } from '../utils'
 import { FileTree } from '../components/FileTree'
 
@@ -11,10 +11,13 @@ export function Detail({ id }) {
   const [error, setError] = useState(null)
   const [activeTab, setActiveTab] = useState('http')
   const [notesHtml, setNotesHtml] = useState(null)
+  const [relatedBackups, setRelatedBackups] = useState([])
 
   useEffect(() => {
     setLoading(true)
     setNotesHtml(null)
+    setRelatedBackups([])
+
     fetchManifest(id)
       .then((data) => {
         setManifest(data)
@@ -37,6 +40,27 @@ export function Detail({ id }) {
               if (text) {
                 setNotesHtml(marked.parse(text))
               }
+            })
+            .catch(() => {})
+        }
+
+        // Fetch related backups with the same name
+        const tags = data.Tags || data.tags || {}
+        if (tags.name) {
+          fetchManifests()
+            .then((allManifests) => {
+              const related = (allManifests || [])
+                .filter((m) => {
+                  const mTags = m.Tags || m.tags || {}
+                  const mId = m.ID || m.id
+                  return mTags.name === tags.name && mId !== id
+                })
+                .sort((a, b) => {
+                  const dateA = new Date(a.CreatedAt || a.created_at)
+                  const dateB = new Date(b.CreatedAt || b.created_at)
+                  return dateB - dateA
+                })
+              setRelatedBackups(related)
             })
             .catch(() => {})
         }
@@ -247,6 +271,24 @@ ipfs cat ${rootCid}/<path/to/file>`}
             </div>
           )}
         </div>
+
+        {relatedBackups.length > 0 && (
+          <div class="versions-section">
+            <h3>Previous Versions</h3>
+            <div class="versions-list">
+              {relatedBackups.map((m) => {
+                const mId = m.ID || m.id
+                const mDate = new Date(m.CreatedAt || m.created_at)
+                return (
+                  <Link key={mId} href={`/backup/${mId}`} class="version-item">
+                    <span class="version-date">{formatRelativeDate(mDate)}</span>
+                    <span class="version-id">{mId}</span>
+                  </Link>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </>
   )

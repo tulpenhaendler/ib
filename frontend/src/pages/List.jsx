@@ -35,11 +35,14 @@ export function List() {
     return tags
   }, [manifests])
 
-  // Filter manifests
+  // Filter and group manifests by name (show only latest per name)
   const filtered = useMemo(() => {
-    return manifests
+    // First filter by tags
+    const filteredList = manifests
       .filter((m) => {
         const tags = m.Tags || m.tags || {}
+        // Only include manifests with a name tag
+        if (!tags.name) return false
         return Object.entries(filters).every(([k, v]) => !v || tags[k] === v)
       })
       .sort((a, b) => {
@@ -47,6 +50,20 @@ export function List() {
         const dateB = new Date(b.CreatedAt || b.created_at)
         return dateB - dateA
       })
+
+    // Group by name, keep only the latest
+    const byName = new Map()
+    filteredList.forEach((m) => {
+      const tags = m.Tags || m.tags || {}
+      const name = tags.name
+      if (!byName.has(name)) {
+        // Count total backups with this name
+        const count = filteredList.filter((x) => (x.Tags || x.tags || {}).name === name).length
+        byName.set(name, { manifest: m, count })
+      }
+    })
+
+    return Array.from(byName.values())
   }, [manifests, filters])
 
   const setFilter = (key, value) => {
@@ -99,16 +116,19 @@ export function List() {
       {filtered.length === 0 ? (
         <div class="empty-state">No backups found</div>
       ) : (
-        filtered.map((m) => {
+        filtered.map(({ manifest: m, count }) => {
           const id = m.ID || m.id
           const date = new Date(m.CreatedAt || m.created_at)
           const tags = m.Tags || m.tags || {}
-          const displayName = tags.name || id
+          const displayName = tags.name
           const displayTags = Object.entries(tags).filter(([k]) => k !== 'name')
 
           return (
             <Link key={id} href={`/backup/${id}`} class="backup-item">
-              <h3>{displayName}</h3>
+              <div class="backup-item-header">
+                <h3>{displayName}</h3>
+                {count > 1 && <span class="backup-count">{count} versions</span>}
+              </div>
               <div class="backup-meta">{formatRelativeDate(date)}</div>
               <div>
                 {displayTags.map(([k, v]) => (

@@ -17,8 +17,10 @@ var createCmd = &cobra.Command{
 	Short: "Create a new backup",
 	Long: `Create a new backup of a directory.
 
-Tags can be specified as key=value pairs using the --tag flag.
-Example: ib backup create --tag node=tezos --tag version=24.0 ./data`,
+The 'name' tag is required to identify and group related backups.
+Additional tags can be specified as key=value pairs using the --tag flag.
+
+Example: ib backup create --tag name=myapp --tag env=prod ./data`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCreate,
 }
@@ -43,6 +45,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid tag format: %s (expected key=value)", t)
 		}
 		tags[parts[0]] = parts[1]
+	}
+
+	// Require the name tag for organizing backups
+	if tags["name"] == "" {
+		return fmt.Errorf("the 'name' tag is required: use --tag name=<backup-name>")
 	}
 
 	fmt.Printf("Creating backup of %s with tags: %v\n", path, tags)

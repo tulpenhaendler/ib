@@ -571,6 +571,70 @@ code {
   color: white;
 }
 
+/* Backup item header */
+.backup-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.backup-item-header h3 {
+  margin: 0;
+}
+
+.backup-count {
+  font-size: 0.75rem;
+  color: #64748b;
+  background: #e2e8f0;
+  padding: 0.125rem 0.5rem;
+  border-radius: 10px;
+}
+
+/* Versions Section */
+.versions-section {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.versions-section h3 {
+  font-size: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.versions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.version-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.625rem 0.875rem;
+  background: #f8fafc;
+  border-radius: 6px;
+  text-decoration: none;
+  color: inherit;
+  transition: background 0.15s;
+}
+
+.version-item:hover {
+  background: #f1f5f9;
+}
+
+.version-date {
+  font-size: 0.875rem;
+  color: #475569;
+}
+
+.version-id {
+  font-size: 0.75rem;
+  font-family: 'SF Mono', Monaco, monospace;
+  color: #64748b;
+}
+
 /* CLI Downloads Section */
 .cli-section {
   margin-top: 2rem;
@@ -668,6 +732,31 @@ code {
   .cli-link:hover {
     background: #475569;
     color: #e2e8f0;
+  }
+
+  .backup-count {
+    background: #334155;
+    color: #94a3b8;
+  }
+
+  .versions-section {
+    border-top-color: #334155;
+  }
+
+  .version-item {
+    background: #1e293b;
+  }
+
+  .version-item:hover {
+    background: #334155;
+  }
+
+  .version-date {
+    color: #94a3b8;
+  }
+
+  .version-id {
+    color: #64748b;
   }
 
   .tabs {
