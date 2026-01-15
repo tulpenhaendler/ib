@@ -33,6 +33,10 @@ type Node struct {
 
 	// Root CIDs to advertise
 	rootCIDs []cid.Cid
+
+	// For periodic re-advertising
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // Config for the IPFS node
@@ -179,12 +183,15 @@ func NewNode(ctx context.Context, storage StorageBackend, cfg *Config) (*Node, e
 	blockService := blockservice.New(blockstore, bswap)
 	dagService := merkledag.NewDAGService(blockService)
 
+	nodeCtx, cancel := context.WithCancel(context.Background())
 	node := &Node{
 		host:       h,
 		dht:        dhtInstance,
 		blockstore: blockstore,
 		bswap:      bswap,
 		dagService: dagService,
+		ctx:        nodeCtx,
+		cancel:     cancel,
 	}
 
 	// Start HTTP gateway if configured
@@ -195,7 +202,28 @@ func NewNode(ctx context.Context, storage StorageBackend, cfg *Config) (*Node, e
 		}
 	}
 
+	// Start periodic re-advertiser (DHT provider records expire)
+	go node.periodicAdvertise()
+
 	return node, nil
+}
+
+// periodicAdvertise re-advertises root CIDs every 12 hours
+func (n *Node) periodicAdvertise() {
+	ticker := time.NewTicker(12 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			if len(n.rootCIDs) > 0 {
+				fmt.Printf("Re-advertising %d root CIDs to DHT...\n", len(n.rootCIDs))
+				n.AdvertiseRoots(n.ctx)
+			}
+		}
+	}
 }
 
 func (n *Node) startGateway(addr string) error {
@@ -232,9 +260,23 @@ func (n *Node) AddRootCID(c cid.Cid) {
 
 // AdvertiseRoots advertises all root CIDs to the DHT
 func (n *Node) AdvertiseRoots(ctx context.Context) error {
+	// Wait for DHT to be ready (need peers to advertise to)
+	fmt.Printf("Waiting for DHT peers before advertising...\n")
+	for i := 0; i < 30; i++ {
+		if n.dht.RoutingTable().Size() > 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	fmt.Printf("DHT routing table has %d peers\n", n.dht.RoutingTable().Size())
+
 	for _, c := range n.rootCIDs {
+		fmt.Printf("Advertising CID to DHT: %s\n", c)
 		if err := n.dht.Provide(ctx, c, true); err != nil {
-			return fmt.Errorf("failed to provide %s: %w", c, err)
+			fmt.Printf("Warning: failed to provide %s: %v\n", c, err)
+			// Continue with other CIDs
+		} else {
+			fmt.Printf("Successfully advertised: %s\n", c)
 		}
 	}
 	return nil
@@ -252,6 +294,9 @@ func (n *Node) Addrs() []multiaddr.Multiaddr {
 
 // Close shuts down the node
 func (n *Node) Close() error {
+	if n.cancel != nil {
+		n.cancel()
+	}
 	if n.gateway != nil {
 		n.gateway.Close()
 	}
