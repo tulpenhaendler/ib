@@ -38,6 +38,7 @@ type Node struct {
 // Config for the IPFS node
 type Config struct {
 	ListenAddrs    []string // libp2p listen addresses
+	AnnounceAddrs  []string // Addresses to announce to the network (public IPs)
 	GatewayAddr    string   // HTTP gateway address (e.g., ":8080")
 	BootstrapPeers []string // Bootstrap peer addresses
 }
@@ -98,15 +99,24 @@ func NewNode(ctx context.Context, storage StorageBackend, cfg *Config) (*Node, e
 		listenAddrs = append(listenAddrs, ma)
 	}
 
+	// Parse announce addresses (public IPs to advertise)
+	var announceAddrs []multiaddr.Multiaddr
+	for _, addr := range cfg.AnnounceAddrs {
+		ma, err := multiaddr.NewMultiaddr(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid announce address %s: %w", addr, err)
+		}
+		announceAddrs = append(announceAddrs, ma)
+	}
+
 	// Create connection manager
 	connMgr, err := connmgr.NewConnManager(100, 400, connmgr.WithGracePeriod(time.Minute))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection manager: %w", err)
 	}
 
-	// Create libp2p host with DHT and NAT traversal
-	var dhtInstance *dht.IpfsDHT
-	h, err := libp2p.New(
+	// Build libp2p options
+	opts := []libp2p.Option{
 		libp2p.ListenAddrs(listenAddrs...),
 		libp2p.ConnectionManager(connMgr),
 		libp2p.NATPortMap(),                    // Enable UPnP/NAT-PMP
@@ -116,12 +126,25 @@ func NewNode(ctx context.Context, storage StorageBackend, cfg *Config) (*Node, e
 		libp2p.EnableAutoRelayWithStaticRelays( // Use relays if needed
 			dht.GetDefaultBootstrapPeerAddrInfos(),
 		),
-		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
-			var err error
-			dhtInstance, err = dht.New(ctx, h, dht.Mode(dht.ModeServer))
-			return dhtInstance, err
-		}),
-	)
+	}
+
+	// Add announce addresses if configured (for servers with public IPs)
+	if len(announceAddrs) > 0 {
+		opts = append(opts, libp2p.AddrsFactory(func([]multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			return announceAddrs
+		}))
+	}
+
+	// Add DHT routing
+	var dhtInstance *dht.IpfsDHT
+	opts = append(opts, libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+		var err error
+		dhtInstance, err = dht.New(ctx, h, dht.Mode(dht.ModeServer))
+		return dhtInstance, err
+	}))
+
+	// Create libp2p host with DHT and NAT traversal
+	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
 	}

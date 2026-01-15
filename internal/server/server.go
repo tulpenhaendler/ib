@@ -69,6 +69,13 @@ func New(cfg *config.ServerConfig, metricsPort int, title string) (*Server, erro
 		if cfg.IPFSGatewayAddr != "" {
 			ipfsCfg.GatewayAddr = cfg.IPFSGatewayAddr
 		}
+		// Set public IP for DHT announcements
+		if cfg.IPFSPublicIP != "" {
+			ipfsCfg.AnnounceAddrs = []string{
+				fmt.Sprintf("/ip4/%s/tcp/4001", cfg.IPFSPublicIP),
+				fmt.Sprintf("/ip4/%s/udp/4001/quic-v1", cfg.IPFSPublicIP),
+			}
+		}
 
 		ipfsNode, err := ipfsnode.NewNode(context.Background(), store, ipfsCfg)
 		if err != nil {
@@ -79,6 +86,10 @@ func New(cfg *config.ServerConfig, metricsPort int, title string) (*Server, erro
 		fmt.Printf("IPFS node started: %s\n", ipfsNode.PeerID())
 		for _, addr := range ipfsNode.Addrs() {
 			fmt.Printf("  Listening: %s/p2p/%s\n", addr, ipfsNode.PeerID())
+		}
+		if cfg.IPFSPublicIP != "" {
+			fmt.Printf("  Announcing: /ip4/%s/tcp/4001/p2p/%s\n", cfg.IPFSPublicIP, ipfsNode.PeerID())
+			fmt.Printf("  Announcing: /ip4/%s/udp/4001/quic-v1/p2p/%s\n", cfg.IPFSPublicIP, ipfsNode.PeerID())
 		}
 		if cfg.IPFSGatewayAddr != "" {
 			fmt.Printf("  Gateway: http://localhost%s/ipfs/<cid>\n", cfg.IPFSGatewayAddr)

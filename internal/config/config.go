@@ -37,6 +37,7 @@ type ServerConfig struct {
 	IPFSEnabled     bool     `json:"ipfs_enabled"`
 	IPFSListenAddrs []string `json:"ipfs_listen_addrs,omitempty"`
 	IPFSGatewayAddr string   `json:"ipfs_gateway_addr,omitempty"`
+	IPFSPublicIP    string   `json:"ipfs_public_ip,omitempty"` // Public IP for DHT announcements
 }
 
 // Dir returns the configuration directory path
@@ -150,6 +151,9 @@ func LoadServer() (*ServerConfig, error) {
 	}
 	if v := os.Getenv("IB_IPFS_GATEWAY_ADDR"); v != "" {
 		cfg.IPFSGatewayAddr = v
+	}
+	if v := os.Getenv("IB_IPFS_PUBLIC_IP"); v != "" {
+		cfg.IPFSPublicIP = v
 	}
 
 	return cfg, nil
